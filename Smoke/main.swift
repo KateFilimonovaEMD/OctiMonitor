@@ -1,7 +1,7 @@
 import Foundation
 
-// Runs without Xcode or a simulator:
-// swiftc Sources/OctiMonitor/PerfStats.swift Smoke/PerfStatsSmoke.swift -o /tmp/perf-smoke && /tmp/perf-smoke
+// Runs without Xcode or a simulator (the file is main.swift so swiftc accepts its top-level code):
+// swiftc Sources/OctiMonitor/PerfStats.swift Smoke/main.swift -o /tmp/perf-smoke && /tmp/perf-smoke
 
 func check(_ condition: Bool, _ message: String) {
     if !condition {

@@ -104,8 +104,8 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 ## Tests
 
 - `Tests/OctiMonitorTests`: XCTest, run in Xcode on a simulator.
-- `Smoke/PerfStatsSmoke.swift`: pure-math check that needs only `swiftc`:
-  `swiftc Sources/OctiMonitor/PerfStats.swift Smoke/PerfStatsSmoke.swift -o /tmp/s && /tmp/s`
+- `Smoke/main.swift`: pure-math check that needs only `swiftc`:
+  `swiftc Sources/OctiMonitor/PerfStats.swift Smoke/main.swift -o /tmp/s && /tmp/s`
 
 ## Known limits
 
