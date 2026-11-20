@@ -15,6 +15,9 @@ create table public.perf_reports (
 create index on public.perf_reports (app, created_at desc);
 
 alter table public.perf_reports enable row level security;
+-- Newer Supabase projects do not grant table access to the API roles automatically.
+grant insert on public.perf_reports to anon;
+grant usage on all sequences in schema public to anon;
 -- The app key can only insert. Reading goes through aggregated views, not the raw table.
 create policy "apps insert reports" on public.perf_reports
   for insert to anon with check (true);
