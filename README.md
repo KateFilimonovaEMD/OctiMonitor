@@ -58,7 +58,7 @@ The panel shows the scene, thermal state, FPS against the target, frame p95/p99,
 
 ## Backend (Supabase)
 
-The table and its access rule live in [`Backend/schema.sql`](Backend/schema.sql); run it once in the Supabase SQL Editor.
+The table and its access rule live in [`Backend/schema.sql`](Backend/schema.sql). [`Backend/dashboard.sql`](Backend/dashboard.sql) adds one read-only function that returns aggregates for a public dashboard (live example: https://evamariadreams.com/octimonitor/). Run both once in the Supabase SQL Editor.
 
 
 Info.plist:
