@@ -24,7 +24,8 @@ public enum OctiMonitor {
         /// Where reports go: an `https://` URL that accepts a JSON array of rows
         /// (Supabase/PostgREST `…/rest/v1/<table>`). Nil keeps reporting off.
         public var endpoint: URL?
-        /// Sent as `apikey` and bearer token (Supabase anon key).
+        /// Sent as `apikey`: a Supabase publishable key (`sb_publishable_…`), or a legacy anon key,
+        /// which as a JWT is also sent as the bearer token.
         public var apiKey: String
         /// Seconds between reports. A report is also sent when the app goes to the background.
         public var reportInterval: TimeInterval
