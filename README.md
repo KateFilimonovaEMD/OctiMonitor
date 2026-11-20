@@ -66,7 +66,7 @@ Info.plist:
 | Key | Value |
 |---|---|
 | `OctiMonitorEndpoint` | `https://<project>.supabase.co/rest/v1/perf_reports` |
-| `OctiMonitorKey` | the project's public anon key (insert-only under the policy above) |
+| `OctiMonitorKey` | the project's publishable key (`sb_publishable_…`) or legacy anon key; insert-only under the policy above |
 
 Or configure it in code: `OctiMonitor.start(.init(endpoint: url, apiKey: key, reportInterval: 30))`.
 

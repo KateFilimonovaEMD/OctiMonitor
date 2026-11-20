@@ -113,7 +113,11 @@ final class SessionReporter {
         request.setValue("return=minimal", forHTTPHeaderField: "Prefer")
         if !apiKey.isEmpty {
             request.setValue(apiKey, forHTTPHeaderField: "apikey")
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            // Legacy anon keys are JWTs and also go in Authorization; new publishable keys
+            // (sb_publishable_…) are not JWTs and must only be sent as apikey.
+            if apiKey.hasPrefix("eyJ") {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
         }
 
         // Going to the background: ask iOS for a few seconds so the last report gets out.
