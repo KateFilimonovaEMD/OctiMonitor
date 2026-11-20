@@ -38,7 +38,9 @@ func draw(in view: MTKView) {
     }
     // … encode, present, commit …
     OctiMonitor.recordFrame(interval: start - lastFrame, cpu: CACurrentMediaTime() - start,
-                            scene: scene, targetFPS: view.preferredFramesPerSecond,
+                            scene: scene,
+                            targetFPS: min(view.preferredFramesPerSecond,
+                                           view.window?.screen.maximumFramesPerSecond ?? 60),
                             degraded: qualityReduced)
 }
 ```

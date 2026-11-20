@@ -59,8 +59,11 @@ public enum OctiMonitor {
     public static var isReporting: Bool { SessionReporter.shared.isEnabled }
 
     /// Once per drawn frame, main thread. `interval`: seconds since the previous frame;
-    /// `cpu`: seconds spent preparing this one; `degraded`: the app is running a reduced
-    /// quality mode right now.
+    /// `cpu`: seconds spent preparing this one; `targetFPS`: the rate the frame is judged
+    /// against, i.e. the requested rate capped by the display
+    /// (`min(view.preferredFramesPerSecond, screen.maximumFramesPerSecond)`), or a 60 Hz
+    /// phone asked for 120 reports every frame as dropped; `degraded`: the app is running a
+    /// reduced quality mode right now.
     public static func recordFrame(interval: Double, cpu: Double, scene: String,
                                    targetFPS: Int, degraded: Bool = false) {
         Monitor.shared.recordFrame(interval: interval, cpu: cpu, scene: scene,
