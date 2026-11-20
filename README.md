@@ -13,7 +13,7 @@ It answers one question: how does the app actually run on players' phones, frame
 
 ## Integration
 
-1. Xcode → File → Add Package Dependencies… → `https://github.com/KateFilimonovaEMD/OctiMonitor` (up to next minor from `0.1.0`), and link the `OctiMonitor` product to the app target.
+1. Xcode → File → Add Package Dependencies… → `https://github.com/KateFilimonovaEMD/OctiMonitor` (branch `main` until the first version tag), and link the `OctiMonitor` product to the app target.
 2. Start it at launch:
 
 ```swift
