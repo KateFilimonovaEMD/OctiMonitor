@@ -1,8 +1,8 @@
 # OctiMonitor
 
-Real-user performance monitoring for iOS Metal apps, as a Swift package with no third-party dependencies. A Unity (C#) package that sends the same report format is planned in `Unity/`.
+Real-user performance monitoring for iOS Metal apps, as a Swift package with no third-party dependencies. A Unity (C#) package that sends the same report format is planned.
 
-It answers one question: how does the app actually run on players' phones, frame by frame, split by whatever the app cares about (a material, a tool, a screen)?
+It answers one question: how does the app actually run on real people's phones, frame by frame, split by whatever the app cares about (a material, a tool, a screen)?
 
 - **Frame pacing:** interval p50 / p95 / p99, dropped frames, hitch time (ms of lateness per second, the metric Apple uses in Instruments and MetricKit).
 - **CPU and GPU time per frame.** GPU time comes from `MTLCommandBuffer.gpuStartTime`/`gpuEndTime`.
@@ -42,8 +42,11 @@ func draw(in view: MTKView) {
                             targetFPS: min(view.preferredFramesPerSecond,
                                            view.window?.screen.maximumFramesPerSecond ?? 60),
                             degraded: qualityReduced)
+    lastFrame = start
 }
 ```
+
+`recordGPU` is optional: an app that has no Metal command buffer of its own can send frame timing alone. Its GPU fields stay 0, and the dashboard says that GPU time isn't reported instead of drawing empty bars.
 
 Without an endpoint the package never touches the network, but the HUD still works.
 
@@ -60,8 +63,7 @@ The panel shows the scene, thermal state, FPS against the target, frame p95/p99,
 
 ## Backend (Supabase)
 
-The table and its access rule live in [`Backend/schema.sql`](Backend/schema.sql). [`Backend/dashboard.sql`](Backend/dashboard.sql) adds one read-only function that returns aggregates for a public dashboard (live example: https://evamariadreams.com/octimonitor/). Run both once in the Supabase SQL Editor.
-
+The table and its access rule live in [`Backend/schema.sql`](Backend/schema.sql). [`Backend/dashboard.sql`](Backend/dashboard.sql) adds one read-only function that returns aggregates for a public dashboard (live example: https://evamariadreams.com/octimonitor/, with a page on how every number is measured: https://evamariadreams.com/octimonitor/docs/). Run both once in the Supabase SQL Editor.
 
 Info.plist:
 
@@ -76,7 +78,7 @@ A `perf` row:
 
 ```json
 {
-  "app": "com.example.game", "kind": "perf", "session": "…", "device": "iPhone15,2",
+  "app": "com.example.app", "kind": "perf", "session": "…", "device": "iPhone15,2",
   "os": "iOS 18.1.0", "app_version": "1.0 (12)", "build": "release",
   "payload": {
     "window_s": 30.01, "target_fps": 60, "thermal_now": "fair", "thermal_worst": "fair",
@@ -103,11 +105,12 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 
 ## Tests
 
-- `Tests/OctiMonitorTests`: XCTest, run in Xcode on a simulator.
+- `Tests/OctiMonitorTests`: XCTest, run in Xcode on a simulator. GitHub Actions runs them on every push (`.github/workflows/ci.yml`), together with the smoke test below.
 - `Smoke/main.swift`: pure-math check that needs only `swiftc`:
   `swiftc Sources/OctiMonitor/PerfStats.swift Smoke/main.swift -o /tmp/s && /tmp/s`
 
 ## Known limits
 
 - The report queue lives in memory (up to 20 reports), so reports that haven't been sent are lost if the app is killed while offline.
+- Reports are retried when the device is offline, the request times out, or the server answers 408, 429 or 5xx. Any other 4xx means the server rejected the rows themselves, so they are dropped rather than holding up newer reports.
 - MetricKit crash stacks arrive unsymbolicated: match the addresses against the build's dSYM.
