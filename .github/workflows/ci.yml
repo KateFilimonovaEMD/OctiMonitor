@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Smoke test (no simulator)
+        run: swiftc Sources/OctiMonitor/PerfStats.swift Smoke/PerfStatsSmoke.swift -o "$RUNNER_TEMP/perf-smoke" && "$RUNNER_TEMP/perf-smoke"
+
+      - name: Build and test on the iOS Simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          print(next(d["udid"] for runtime, ds in sorted(devices.items(), reverse=True) if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))')
+          xcodebuild test -scheme OctiMonitor -destination "id=$UDID" -skipPackagePluginValidation | tail -40
+          exit ${PIPESTATUS[0]}

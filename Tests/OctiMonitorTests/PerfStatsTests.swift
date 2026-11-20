@@ -45,4 +45,12 @@ final class PerfStatsTests: XCTestCase {
         XCTAssertEqual(b?["degraded_share"] as? Double, 1)
         XCTAssertNil(monitor.drainReport(), "nothing drawn since the last report")
     }
+
+    func testRetryOnlyWhatCanSucceedLater() {
+        XCTAssertTrue(SessionReporter.isWorthRetrying(status: 0), "offline")
+        XCTAssertTrue(SessionReporter.isWorthRetrying(status: 503))
+        XCTAssertTrue(SessionReporter.isWorthRetrying(status: 429))
+        XCTAssertFalse(SessionReporter.isWorthRetrying(status: 400), "rejected rows stay rejected")
+        XCTAssertFalse(SessionReporter.isWorthRetrying(status: 401))
+    }
 }

@@ -135,9 +135,14 @@ final class SessionReporter {
                 guard let self else { return }
                 self.sending = false
                 if !delivered {
-                    // Keep the rows for the next tick, ahead of anything newer.
-                    self.pending = batch + self.pending
-                    self.trimQueue()
+                    // Offline, timeout, rate limit or a server error: keep the rows for the next tick,
+                    // ahead of anything newer. Any other 4xx means the server rejected the rows
+                    // themselves; sending them again would fail the same way and hold up every
+                    // newer report behind them, so they are dropped.
+                    if Self.isWorthRetrying(status: status) {
+                        self.pending = batch + self.pending
+                        self.trimQueue()
+                    }
                     #if DEBUG
                     print("OctiMonitor: report not delivered (status \(status)) \(reason)")
                     #endif
@@ -145,6 +150,11 @@ final class SessionReporter {
                 self.endBackgroundTask()
             }
         }.resume()
+    }
+
+    /// 0 is a transport error (no response at all).
+    static func isWorthRetrying(status: Int) -> Bool {
+        status == 0 || status == 408 || status == 429 || status >= 500
     }
 
     /// Main thread.
