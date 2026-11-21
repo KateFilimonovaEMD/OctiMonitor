@@ -12,6 +12,9 @@ import UIKit
 final class SessionReporter {
     static let shared = SessionReporter()
     private static let maxPending = 20
+    /// The server refuses payloads over 256 KB, and one refused row fails the whole batch it
+    /// travels in, so oversized rows (in practice only huge MetricKit diagnostics) are not sent.
+    private static let maxRowBytes = 200_000
 
     private var endpoint: URL?
     private var apiKey = ""
@@ -19,14 +22,18 @@ final class SessionReporter {
     private let sessionID = UUID().uuidString.lowercased()
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
-    /// Encoded rows waiting to go out (main thread only).
+    /// Encoded rows waiting to go out, and the batch currently being sent (main thread only).
     private var pending: [Data] = []
+    private var inFlight: [Data] = []
     private var sending = false
+    /// The queue file on disk holds rows that may still need sending.
+    private var savedToDisk = false
     private var backgroundTask = UIBackgroundTaskIdentifier.invalid
     /// Rows lost since the last report (queue full, or rejected by the server). Sent with the
     /// next report so the dashboard can show how complete the data is.
     private var droppedRows = 0
-    /// Rows saved when the app went to the background are kept this long, then discarded.
+    /// Saved reports older than this (by the end of their window) are discarded rather than
+    /// sent late: the dashboard trusts a phone's timestamp only within two days of arrival.
     private static let savedRowsLifetime: TimeInterval = 24 * 3600
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -60,10 +67,14 @@ final class SessionReporter {
             })
         observers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.saveQueue(extra: [])
+                self?.saveQueue()
             })
-        // Reports the app couldn't send before it was closed go out with the first report.
-        pending = Self.loadSavedRows() + pending
+        // Reports the app couldn't send before it was closed go out with the first report. The
+        // file stays until the server confirms them, in case the app is closed again first.
+        let saved = Self.loadSavedRows()
+        pending = saved.rows + pending
+        droppedRows += saved.expired
+        savedToDisk = !saved.rows.isEmpty
         trimQueue()
     }
 
@@ -103,6 +114,10 @@ final class SessionReporter {
         ]
         guard JSONSerialization.isValidJSONObject(row),
               let data = try? JSONSerialization.data(withJSONObject: row) else { return }
+        guard data.count <= Self.maxRowBytes else {
+            if kind == "perf" { droppedRows += 1 }
+            return
+        }
         pending.append(data)
         trimQueue()
     }
@@ -122,23 +137,36 @@ final class SessionReporter {
             .appendingPathComponent("OctiMonitor-pending.json")
     }
 
-    /// Main thread. Writes the queue (plus rows in flight) so they aren't lost if the app is
-    /// closed before they're delivered; a delivered batch removes the file again.
-    private func saveQueue(extra: [Data]) {
+    /// Main thread. Writes every row not yet confirmed by the server (the batch in flight and
+    /// the queue) so they aren't lost if the app is closed; rewritten after each response, so a
+    /// delivered batch leaves the file and is never sent twice.
+    private func saveQueue() {
         guard let url = Self.savedRowsURL else { return }
-        let rows = Array((extra + pending).suffix(Self.maxPending))
+        let rows = Array((inFlight + pending).suffix(Self.maxPending))
+        savedToDisk = !rows.isEmpty
         if rows.isEmpty { try? FileManager.default.removeItem(at: url); return }
         try? Self.arrayBody(rows).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
-    private static func loadSavedRows() -> [Data] {
-        guard let url = savedRowsURL, let data = try? Data(contentsOf: url) else { return [] }
-        let age = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-            .map { Date().timeIntervalSince($0) } ?? .infinity
-        try? FileManager.default.removeItem(at: url)
-        guard age < savedRowsLifetime,
-              let rows = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return [] }
-        return rows.compactMap { try? JSONSerialization.data(withJSONObject: $0) }
+    /// Rows from the file, without the ones too old to send. Leaves the file in place.
+    private static func loadSavedRows() -> (rows: [Data], expired: Int) {
+        guard let url = savedRowsURL, let data = try? Data(contentsOf: url) else { return ([], 0) }
+        guard let objects = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            try? FileManager.default.removeItem(at: url)   // unreadable: start clean
+            return ([], 0)
+        }
+        var rows: [Data] = []
+        var expired = 0
+        for object in objects {
+            let ended = ((object["payload"] as? [String: Any])?["ended_at"] as? String).flatMap(isoFormatter.date(from:))
+            if let ended, Date().timeIntervalSince(ended) > savedRowsLifetime {
+                expired += 1
+                continue
+            }
+            if let row = try? JSONSerialization.data(withJSONObject: object) { rows.append(row) }
+        }
+        if rows.isEmpty { try? FileManager.default.removeItem(at: url) }
+        return (rows, expired)
     }
 
     private static func arrayBody(_ rows: [Data]) -> Data {
@@ -152,15 +180,17 @@ final class SessionReporter {
     }
 
     private func send(inBackground: Bool) {
+        // Leaving the app: keep everything unconfirmed on disk, including a batch that is
+        // already on its way from before (the request may be suspended with the app).
+        defer { if inBackground { saveQueue() } }
         guard let endpoint, !sending, !pending.isEmpty else { return }
         let batch = pending
         pending.removeAll()
+        inFlight = batch
         sending = true
 
         // One request for every queued row: PostgREST inserts a JSON array in one go.
         let body = Self.arrayBody(batch)
-        // Leaving the app: keep a copy on disk until the server confirms the rows.
-        if inBackground { saveQueue(extra: batch) }
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -190,6 +220,7 @@ final class SessionReporter {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.sending = false
+                self.inFlight = []
                 if !delivered {
                     // Offline, timeout, rate limit or a server error: keep the rows for the next tick,
                     // ahead of anything newer. Any other 4xx means the server rejected the rows
@@ -205,7 +236,9 @@ final class SessionReporter {
                     print("OctiMonitor: report not delivered (status \(status)) \(reason)")
                     #endif
                 }
-                if inBackground { self.saveQueue(extra: []) }   // delivered rows leave the file
+                // The file may hold this batch (saved when the app left, even if the request
+                // started earlier): rewrite it so delivered rows leave it and kept ones stay.
+                if self.savedToDisk { self.saveQueue() }
                 self.endBackgroundTask()
             }
         }.resume()

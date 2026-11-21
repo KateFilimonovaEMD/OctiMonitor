@@ -67,11 +67,11 @@ The panel shows the scene, thermal state, FPS against the target, frame p95/p99,
 
 ## Backend (Supabase)
 
-New project: run [`Backend/schema.sql`](Backend/schema.sql), [`Backend/hardening.sql`](Backend/hardening.sql) and [`Backend/dashboard.sql`](Backend/dashboard.sql) in the Supabase SQL Editor. A project created with the first version: run [`Backend/migrations/002_accuracy_and_rules.sql`](Backend/migrations/002_accuracy_and_rules.sql) once (it contains the other two and is safe to re-run).
+New project: run [`Backend/schema.sql`](Backend/schema.sql), [`Backend/hardening.sql`](Backend/hardening.sql) and [`Backend/dashboard.sql`](Backend/dashboard.sql) in the Supabase SQL Editor. A project created with the first version: run [`Backend/migrations/002_accuracy_and_rules.sql`](Backend/migrations/002_accuracy_and_rules.sql) once (it contains the other two and is safe to re-run). It keeps every app that has already sent reports allowed; add apps that haven't reported yet to `octimonitor_apps`.
 
 - `schema.sql`: the table; the app key can only insert.
-- `hardening.sql`: only apps listed in `octimonitor_apps` can report (`insert into public.octimonitor_apps values ('com.example.app');`), reports must have a plausible shape, at most 40 per session and 2,000 per app per minute, and no sequence rights for the public role.
-- `dashboard.sql`: one read-only function for a public dashboard. Percentiles from merged histograms, GPU over measured frames only, a frame budget per group from the reported target rates, and per-build, per-phone data so builds can be compared on the same phones.
+- `hardening.sql`: only apps listed in `octimonitor_apps` can report (`insert into public.octimonitor_apps values ('com.example.app');`), reports must have the SDK's shape (numbers where numbers belong, in plausible ranges, valid histograms), at most 40 per session and 2,000 per app per minute (over that the API answers 429 and the SDK retries later), and no sequence rights for the public role.
+- `dashboard.sql`: one read-only function for a public dashboard. Percentiles from merged histograms, GPU over measured frames only, a frame budget per group from the reported target rates, and per-build, per-phone data so builds can be compared on the same phones. Every field is read defensively, so a malformed row stored before the rules existed can't break it.
 
 Dashboard: [`Dashboard/`](Dashboard/) is a ready-made copy of the live dashboard for your own backend: set your project URL and key in one place and publish the folder anywhere static. Setup in [`Dashboard/README.md`](Dashboard/README.md). Live example: https://evamariadreams.com/octimonitor/, with a page on how every number is measured: https://evamariadreams.com/octimonitor/docs/
 
@@ -84,24 +84,31 @@ Info.plist:
 
 Or configure it in code: `OctiMonitor.start(.init(endpoint: url, apiKey: key, reportInterval: 30))`.
 
-A `perf` row:
+A `perf` row (schema 2). The histograms list only non-empty buckets as `[bucket, count]` and add up to `frames` and `gpu_samples`:
 
 ```json
 {
   "app": "com.example.app", "kind": "perf", "session": "…", "device": "iPhone15,2",
   "os": "iOS 18.1.0", "app_version": "1.0 (12)", "build": "release",
   "payload": {
-    "window_s": 30.01, "target_fps": 60, "thermal_now": "fair", "thermal_worst": "fair",
-    "memory_mb_peak": 212.4,
+    "schema": 2, "window_s": 30.01, "target_fps": 60, "pacing": "screen",
+    "ended_at": "2026-11-21T10:15:30.120Z", "reports_dropped": 0,
+    "session_active_start_s": 90.02, "session_active_s": 119.93,
+    "thermal_now": "fair", "thermal_worst": "fair", "memory_mb_peak": 212.4,
     "scenes": [{
-      "scene": "Slime", "frames": 1790, "seconds": 29.9, "fps": 59.87,
-      "frame_ms": {"p50": 16.67, "p95": 17.4, "p99": 33.3, "max": 50.1, "n": 1790},
-      "gpu_ms":   {"p50": 6.1, "p95": 8.9, "p99": 11.2, "max": 14.0, "n": 1790},
-      "cpu_ms_avg": 2.3, "dropped_frames": 4, "hitch_ms_per_s": 2.1, "degraded_share": 0
+      "scene": "Slime", "target_fps": 60, "frames": 1790, "seconds": 29.91, "fps": 59.85,
+      "frame_ms": {"p50": 16.67, "p95": 16.71, "p99": 16.98, "max": 50.1, "n": 1790},
+      "frame_hist": [[66, 1720], [67, 66], [133, 3], [200, 1]],
+      "gpu_ms": {"p50": 6.1, "p95": 8.9, "p99": 8.98, "max": 8.99, "n": 1790},
+      "gpu_samples": 1790, "gpu_hist": [[24, 900], [25, 610], [35, 280]],
+      "dropped_frames": 4, "hitch_ms": 84.5, "hitch_ms_per_s": 2.83,
+      "draw_calls": 1792, "cpu_ms_avg": 2.3, "degraded_share": 0
     }]
   }
 }
 ```
+
+`frame_ms` and `gpu_ms` are exact for the window (its latest 4,096 frames, which covers 30 s at 120 Hz); the histograms cover every frame. `gpu_ms` is `null` and `gpu_hist` absent when GPU time wasn't recorded. `pacing` says whether intervals came from the screen (`recordPresented`) or from draw calls.
 
 ## Privacy
 
@@ -111,7 +118,7 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 
 - **Dropped frame:** an interval longer than 1.5 display intervals (more than 25 ms at 60 Hz).
 - **Hitch time:** for dropped frames only, `interval − display interval`, summed and divided by the time in use. Under 5 ms/s is good, 5–10 ms/s is noticeable, over 10 ms/s is bad.
-- **Percentiles:** nearest rank. Exact within a report window; over longer ranges, read from the sum of histograms (buckets 0.25 ms wide below 50 ms, 2 ms to 200 ms, 25 ms to 1 s).
+- **Percentiles:** nearest rank. Exact within a report window; over longer ranges, read from the sum of histograms at the middle of the bucket (buckets 0.25 ms wide below 50 ms, 2 ms to 200 ms, 25 ms to 1 s).
 - Gaps longer than 1 s are treated as pauses, not frames.
 
 ## Tests
@@ -124,8 +131,9 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 
 ## Known limits
 
-- Up to 20 unsent reports wait in memory and are saved to disk when the app goes to the background (kept for a day), so closing the app while offline doesn't lose them; a crash while offline can. Each report counts the ones lost before it.
-- Reports are retried when the device is offline, the request times out, or the server answers 408, 429 or 5xx. Any other 4xx means the server rejected the rows themselves, so they are dropped rather than holding up newer reports.
+- Up to 20 unsent reports wait in memory. When the app goes to the background they are saved to disk, together with a batch still on its way, and the file stays until the server confirms them, including across launches; so closing the app while offline doesn't lose them, and a delivered batch is never sent twice. A crash while offline before the app was ever backgrounded can lose them. Saved reports whose window ended more than a day ago are discarded, and each report counts the ones lost before it.
+- Reports are retried when the device is offline, the request times out, or the server answers 408, 429 or 5xx (the rate limits answer 429). Any other 4xx means the server rejected the rows themselves, so they are dropped rather than holding up newer reports. A batch is accepted or rejected as a whole.
+- Rows over 200 KB are not sent (the table refuses payloads over 256 KB, and one refused row would fail its whole batch); in practice only very large MetricKit diagnostics come near this.
 - MetricKit crash stacks arrive unsymbolicated: match the addresses against the build's dSYM.
 - The publishable key can be extracted from the app, so the ingestion rules stop floods and malformed reports, not plausible fakes. Proving reports come from a genuine app needs App Attest checked by a server in front of the database.
 
