@@ -73,7 +73,7 @@ New project: run [`Backend/schema.sql`](Backend/schema.sql), [`Backend/hardening
 - `hardening.sql`: only apps listed in `octimonitor_apps` can report (`insert into public.octimonitor_apps values ('com.example.app');`), reports must have a plausible shape, at most 40 per session and 2,000 per app per minute, and no sequence rights for the public role.
 - `dashboard.sql`: one read-only function for a public dashboard. Percentiles from merged histograms, GPU over measured frames only, a frame budget per group from the reported target rates, and per-build, per-phone data so builds can be compared on the same phones.
 
-Live example: https://evamariadreams.com/octimonitor/, with a page on how every number is measured: https://evamariadreams.com/octimonitor/docs/
+Dashboard: [`Dashboard/`](Dashboard/) is a ready-made copy of the live dashboard for your own backend: set your project URL and key in one place and publish the folder anywhere static. Setup in [`Dashboard/README.md`](Dashboard/README.md). Live example: https://evamariadreams.com/octimonitor/, with a page on how every number is measured: https://evamariadreams.com/octimonitor/docs/
 
 Info.plist:
 
