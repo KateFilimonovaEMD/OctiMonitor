@@ -63,7 +63,7 @@ private struct PerfPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                Text(snapshot.scene.isEmpty ? "—" : snapshot.scene)
+                Text(snapshot.scene.isEmpty ? "–" : snapshot.scene)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 4)
@@ -72,8 +72,8 @@ private struct PerfPanel: View {
             row("FPS", "\(Int(snapshot.fps.rounded())) / \(snapshot.targetFPS)")
             row("Frame p95", ms(snapshot.frame.p95))
             row("Frame p99", ms(snapshot.frame.p99))
-            row("GPU p50", snapshot.gpu.count > 0 ? ms(snapshot.gpu.p50) : "—")
-            row("GPU p95", snapshot.gpu.count > 0 ? ms(snapshot.gpu.p95) : "—")
+            row("GPU p50", snapshot.gpu.count > 0 ? ms(snapshot.gpu.p50) : "–")
+            row("GPU p95", snapshot.gpu.count > 0 ? ms(snapshot.gpu.p95) : "–")
             row("Hitches", String(format: "%.1f ms/s", snapshot.hitchMsPerSecond))
             row("Memory", String(format: "%.0f MB", snapshot.memoryMB))
             row("Timing", snapshot.pacingFromScreen ? "screen" : "draw calls")
