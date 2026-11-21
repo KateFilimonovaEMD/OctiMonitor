@@ -56,7 +56,7 @@ Without an endpoint the package never touches the network, but the HUD still wor
 
 ## Overhead
 
-On the render path each frame costs one lock, one dictionary lookup, a few writes into rings and two histogram increments, all allocated up front: **no heap allocation** once a scene has been seen. `testCostPerFrame` records 200,000 frames (draw call, presentation and GPU time) on every CI run and prints the cost: about 1.3 µs per frame on the CI simulator, 0.008% of a 16.7 ms frame; it fails above 20 µs. Memory and thermal state are sampled once a second. Window percentiles are computed only on demand: 4× a second while the HUD is open, and once per report. To measure on a specific phone, compare Time Profiler and Allocations in Instruments with and without `OctiMonitor.start()`.
+On the render path each frame costs one lock, one dictionary lookup, a few writes into rings and two histogram increments, all allocated up front: **no heap allocation** once a scene has been seen. `testCostPerFrame` records 200,000 frames (draw call, presentation and GPU time) on every CI run and prints the cost: about 1.3 to 1.7 µs per frame on the CI simulator (about 0.01% of a 16.7 ms frame); it fails above 20 µs. Memory and thermal state are sampled once a second. Window percentiles are computed only on demand: 4× a second while the HUD is open, and once per report. To measure on a specific phone, compare Time Profiler and Allocations in Instruments with and without `OctiMonitor.start()`.
 
 ## HUD
 
