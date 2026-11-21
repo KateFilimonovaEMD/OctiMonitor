@@ -35,4 +35,12 @@ check(FramePacing.isDropped(interval: 0.034, target: target), "34 ms missed a sl
 check(FramePacing.hitchTime(interval: 0.020, target: target) == 0, "no hitch time for jitter")
 check(abs(FramePacing.hitchTime(interval: 0.050, target: target) - (0.050 - target)) < 1e-9, "hitch time")
 
+// Histogram: buckets cover 0–1000 ms without gaps and merge by adding counts.
+check(DurationHistogram.index(ms: 16.67) == 66, "16.67 ms bucket")
+check(DurationHistogram.index(ms: 50) == 200 && DurationHistogram.index(ms: 200) == 275, "bucket boundaries")
+var h = DurationHistogram()
+for ms in 1...100 { h.add(seconds: Double(ms) / 1000) }
+check(abs((h.percentile(0.95) ?? 0) - 95) < 0.001, "histogram p95 \(h.percentile(0.95) ?? -1)")
+check(h.sparse.reduce(0) { $0 + $1[1] } == 100, "sparse counts add up")
+
 print("PASS: PerfStatsSmoke")

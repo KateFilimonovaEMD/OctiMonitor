@@ -11,6 +11,9 @@ import QuartzCore
 /// commandBuffer.addCompletedHandler { b in
 ///     OctiMonitor.recordGPU(start: b.gpuStartTime, end: b.gpuEndTime, scene: "Slime")
 /// }
+/// drawable.addPresentedHandler { d in
+///     OctiMonitor.recordPresented(time: d.presentedTime, scene: "Slime", targetFPS: 60)
+/// }
 /// OctiMonitor.recordFrame(interval: dt, cpu: cpuTime, scene: "Slime", targetFPS: 60)
 ///
 /// // Overlay
@@ -71,7 +74,16 @@ public enum OctiMonitor {
                                    targetFPS: targetFPS, degraded: degraded)
     }
 
-    /// GPU time of one command buffer, from its completed handler (any thread).
+    /// When a frame actually reached the screen: `MTLDrawable.presentedTime`, from the
+    /// drawable's presented handler (any thread). Optional but recommended: with it, frame
+    /// pacing and hitches are measured from what people see rather than from draw calls.
+    /// Register the handler before presenting the drawable.
+    public static func recordPresented(time: CFTimeInterval, scene: String, targetFPS: Int) {
+        Monitor.shared.recordPresented(time: time, scene: scene, targetFPS: targetFPS)
+    }
+
+    /// GPU time of one command buffer, from its completed handler (any thread). Optional:
+    /// without it reports mark GPU time as not measured, never as zero.
     public static func recordGPU(start: CFTimeInterval, end: CFTimeInterval, scene: String) {
         Monitor.shared.recordGPU(start: start, end: end, scene: scene)
     }

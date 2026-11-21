@@ -80,6 +80,68 @@ struct PercentileSummary {
     }
 }
 
+/// Fixed-bucket histogram of durations. Unlike a percentile, histograms can be added
+/// together, so the server can merge any number of windows, phones or days and read the
+/// percentiles of all of those frames at once, accurate to half a bucket.
+///
+/// Buckets (milliseconds): 0.25 wide below 50, 2 wide from 50 to 200, 25 wide from 200 to
+/// 1000. Storage is allocated once; adding a sample is one division and one increment.
+/// The server mirrors these edges in `octimonitor_bucket_mid` (Backend/dashboard.sql).
+struct DurationHistogram {
+    static let bucketCount = 307
+    private(set) var counts: [UInt32]
+    private(set) var total = 0
+
+    init() { counts = [UInt32](repeating: 0, count: Self.bucketCount) }
+
+    static func index(ms: Double) -> Int {
+        guard ms.isFinite, ms > 0 else { return 0 }
+        if ms < 50 { return Int(ms / 0.25) }
+        if ms < 200 { return 200 + Int((ms - 50) / 2) }
+        if ms < 1000 { return 275 + Int((ms - 200) / 25) }
+        return bucketCount - 1
+    }
+
+    /// Lower and upper edge of a bucket, in milliseconds.
+    static func range(of index: Int) -> (lower: Double, upper: Double) {
+        switch index {
+        case ..<200: return (Double(index) * 0.25, Double(index + 1) * 0.25)
+        case ..<275: return (50 + Double(index - 200) * 2, 50 + Double(index - 199) * 2)
+        default: return (200 + Double(index - 275) * 25, 200 + Double(index - 274) * 25)
+        }
+    }
+
+    mutating func add(seconds: Double) {
+        counts[Self.index(ms: seconds * 1000)] &+= 1
+        total += 1
+    }
+
+    mutating func removeAll() {
+        guard total > 0 else { return }
+        for i in counts.indices { counts[i] = 0 }
+        total = 0
+    }
+
+    /// Nearest-rank percentile read at the middle of its bucket, in milliseconds.
+    func percentile(_ p: Double) -> Double? {
+        guard total > 0 else { return nil }
+        let rank = Swift.max(1, Int((p * Double(total)).rounded(.up)))
+        var seen = 0
+        for (i, c) in counts.enumerated() where c > 0 {
+            seen += Int(c)
+            if seen >= rank { let r = Self.range(of: i); return (r.lower + r.upper) / 2 }
+        }
+        return nil
+    }
+
+    /// Only the buckets that have samples, as `[[bucket, count], …]` (built once per report).
+    var sparse: [[Int]] {
+        var out: [[Int]] = []
+        for (i, c) in counts.enumerated() where c > 0 { out.append([i, Int(c)]) }
+        return out
+    }
+}
+
 /// How frames are judged against the display's refresh interval.
 enum FramePacing {
     /// The frame missed its slot: it took more than 1.5 display intervals.

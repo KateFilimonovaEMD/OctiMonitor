@@ -23,6 +23,16 @@ final class SessionReporter {
     private var pending: [Data] = []
     private var sending = false
     private var backgroundTask = UIBackgroundTaskIdentifier.invalid
+    /// Rows lost since the last report (queue full, or rejected by the server). Sent with the
+    /// next report so the dashboard can show how complete the data is.
+    private var droppedRows = 0
+    /// Rows saved when the app went to the background are kept this long, then discarded.
+    private static let savedRowsLifetime: TimeInterval = 24 * 3600
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 
     private init() {
         let config = URLSessionConfiguration.ephemeral
@@ -48,12 +58,22 @@ final class SessionReporter {
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
                 self?.flush(inBackground: true)
             })
+        observers.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                self?.saveQueue(extra: [])
+            })
+        // Reports the app couldn't send before it was closed go out with the first report.
+        pending = Self.loadSavedRows() + pending
+        trimQueue()
     }
 
     /// Main thread: closes the current measurement window and sends what is queued.
     func flush(inBackground: Bool) {
         guard isEnabled else { return }
-        if let report = Monitor.shared.drainReport() {
+        if var report = Monitor.shared.drainReport() {
+            report["ended_at"] = Self.isoFormatter.string(from: Date())
+            report["reports_dropped"] = droppedRows
+            droppedRows = 0
             enqueue(kind: "perf", payload: report)
         }
         send(inBackground: inBackground)
@@ -89,7 +109,46 @@ final class SessionReporter {
 
     /// Oldest rows go first when the device stays offline for a long time.
     private func trimQueue() {
-        if pending.count > Self.maxPending { pending.removeFirst(pending.count - Self.maxPending) }
+        if pending.count > Self.maxPending {
+            droppedRows += pending.count - Self.maxPending
+            pending.removeFirst(pending.count - Self.maxPending)
+        }
+    }
+
+    // MARK: - Saved rows (survive the app being closed while offline)
+
+    private static var savedRowsURL: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("OctiMonitor-pending.json")
+    }
+
+    /// Main thread. Writes the queue (plus rows in flight) so they aren't lost if the app is
+    /// closed before they're delivered; a delivered batch removes the file again.
+    private func saveQueue(extra: [Data]) {
+        guard let url = Self.savedRowsURL else { return }
+        let rows = Array((extra + pending).suffix(Self.maxPending))
+        if rows.isEmpty { try? FileManager.default.removeItem(at: url); return }
+        try? Self.arrayBody(rows).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    private static func loadSavedRows() -> [Data] {
+        guard let url = savedRowsURL, let data = try? Data(contentsOf: url) else { return [] }
+        let age = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+            .map { Date().timeIntervalSince($0) } ?? .infinity
+        try? FileManager.default.removeItem(at: url)
+        guard age < savedRowsLifetime,
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return [] }
+        return rows.compactMap { try? JSONSerialization.data(withJSONObject: $0) }
+    }
+
+    private static func arrayBody(_ rows: [Data]) -> Data {
+        var body = Data("[".utf8)
+        for (index, row) in rows.enumerated() {
+            if index > 0 { body.append(Data(",".utf8)) }
+            body.append(row)
+        }
+        body.append(Data("]".utf8))
+        return body
     }
 
     private func send(inBackground: Bool) {
@@ -99,12 +158,9 @@ final class SessionReporter {
         sending = true
 
         // One request for every queued row: PostgREST inserts a JSON array in one go.
-        var body = Data("[".utf8)
-        for (index, row) in batch.enumerated() {
-            if index > 0 { body.append(Data(",".utf8)) }
-            body.append(row)
-        }
-        body.append(Data("]".utf8))
+        let body = Self.arrayBody(batch)
+        // Leaving the app: keep a copy on disk until the server confirms the rows.
+        if inBackground { saveQueue(extra: batch) }
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -142,11 +198,14 @@ final class SessionReporter {
                     if Self.isWorthRetrying(status: status) {
                         self.pending = batch + self.pending
                         self.trimQueue()
+                    } else {
+                        self.droppedRows += batch.count
                     }
                     #if DEBUG
                     print("OctiMonitor: report not delivered (status \(status)) \(reason)")
                     #endif
                 }
+                if inBackground { self.saveQueue(extra: []) }   // delivered rows leave the file
                 self.endBackgroundTask()
             }
         }.resume()
