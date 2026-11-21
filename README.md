@@ -128,3 +128,7 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 - Reports are retried when the device is offline, the request times out, or the server answers 408, 429 or 5xx. Any other 4xx means the server rejected the rows themselves, so they are dropped rather than holding up newer reports.
 - MetricKit crash stacks arrive unsymbolicated: match the addresses against the build's dSYM.
 - The publishable key can be extracted from the app, so the ingestion rules stop floods and malformed reports, not plausible fakes. Proving reports come from a genuine app needs App Attest checked by a server in front of the database.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
