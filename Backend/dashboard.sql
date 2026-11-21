@@ -1,12 +1,43 @@
--- OctiMonitor public dashboard: one read-only function that returns aggregates only.
--- The raw table stays unreadable with the public key; this function runs as its owner
--- (security definer) and exposes counts, frame-weighted means and distributions,
--- never individual rows or session ids. Run once in the Supabase SQL Editor, after schema.sql.
+-- OctiMonitor dashboard: one read-only function that returns the numbers for the public
+-- dashboard. The raw table stays unreadable with the public key; this function runs as its
+-- owner (security definer) and returns totals, distributions and anonymous per-window
+-- summaries (no session ids). Run in the Supabase SQL Editor after schema.sql; safe to re-run.
 --
--- Per-scene "p95" values are frame-weighted means of the 30-second windows' p95,
--- a standard approximation when only window summaries are stored.
+-- Accuracy
+--   * Percentiles come from merged histograms (SDK schema 2): the bucket counts of every
+--     window in a group are added up and the percentile is read from the sum, so a p95 over
+--     a day is the p95 of all of that day's frames, accurate to half a bucket (0.125 ms below
+--     50 ms). Groups that include older reports without histograms fall back to the
+--     frame-weighted mean of window p95s and are flagged `*_exact: false`.
+--   * GPU time is aggregated only over windows that measured it, weighted by GPU samples.
+--     Missing GPU timing is null, never zero.
+--   * Each group reports the frame budget it should be judged against (`target_fps`, the
+--     most common target in the group; `mixed_targets` when several occur).
+--   * Hitch time and fps are sums divided by sums, so they are exact for any group.
 
 create index if not exists perf_reports_created_at_idx on public.perf_reports (created_at desc);
+
+-- Middle of histogram bucket i, in milliseconds. Mirrors DurationHistogram in PerfStats.swift.
+create or replace function public.octimonitor_bucket_mid(i int)
+returns float8 language sql immutable parallel safe set search_path = '' as $$
+  select case
+    when i < 200 then (i + 0.5) * 0.25
+    when i < 275 then 50 + (i - 200 + 0.5) * 2
+    else 200 + (i - 275 + 0.5) * 25
+  end
+$$;
+
+-- Nearest-rank percentile from bucket/count pairs (duplicates are added up first).
+create or replace function public.octimonitor_pct(buckets int[], counts bigint[], p float8)
+returns float8 language sql immutable parallel safe set search_path = '' as $$
+  with h as (
+    select b, sum(c) as c from unnest(buckets, counts) as u(b, c) where b is not null group by b
+  ), t as (
+    select b, c, sum(c) over (order by b) as cum, sum(c) over () as total from h
+  )
+  select round(public.octimonitor_bucket_mid(b)::numeric, 3)::float8
+  from t where cum >= greatest(1, ceil(p * total)) order by b limit 1
+$$;
 
 create or replace function public.octimonitor_overview(p_hours int default 24, p_app text default null)
 returns jsonb
@@ -19,28 +50,61 @@ with params as (
   select least(greatest(coalesce(p_hours, 24), 1), 720) as hours
 ),
 r as (
-  select pr.id, pr.created_at, pr.app, pr.session, pr.device, pr.app_version, pr.payload
+  -- `at` is when the window ended on the phone; reports delivered late (offline, saved queue)
+  -- still land in the right place on the timeline. Implausible phone clocks fall back to
+  -- the arrival time.
+  select pr.id, pr.app, pr.session, pr.device, pr.app_version, pr.payload, pr.created_at,
+         case when (pr.payload->>'ended_at') ~ '^\d{4}-\d\d-\d\dT'
+                   and (pr.payload->>'ended_at')::timestamptz between pr.created_at - interval '2 days'
+                                                                  and pr.created_at + interval '5 minutes'
+              then (pr.payload->>'ended_at')::timestamptz else pr.created_at end as at
   from public.perf_reports pr, params
   where pr.kind = 'perf'
     and pr.created_at > now() - make_interval(hours => params.hours)
     and (p_app is null or pr.app = p_app)
 ),
 s as (
-  select r.id, r.created_at, r.app, r.session, r.device, r.app_version,
-         r.payload->>'thermal_worst'                as thermal,
-         e->>'scene'                                as scene,
-         coalesce((e->>'frames')::int, 0)           as frames,
-         coalesce((e->>'seconds')::float8, 0)       as seconds,
-         coalesce((e->'frame_ms'->>'p95')::float8, 0) as frame_p95,
-         coalesce((e->'gpu_ms'->>'p50')::float8, 0) as gpu_p50,
-         coalesce((e->'gpu_ms'->>'p95')::float8, 0) as gpu_p95,
-         coalesce((e->>'hitch_ms_per_s')::float8, 0) as hitch,
-         coalesce((e->>'dropped_frames')::int, 0)   as dropped,
-         coalesce((e->>'degraded_share')::float8, 0) as degraded
+  select r.id, r.at, r.app, r.session, r.device, r.app_version,
+         r.payload->>'thermal_worst'                                   as thermal,
+         coalesce(r.payload->>'pacing', 'draw')                        as pacing,
+         (r.payload->>'session_active_start_s')::float8                as active_start,
+         e->>'scene'                                                   as scene,
+         coalesce((e->>'target_fps')::int, (r.payload->>'target_fps')::int, 60) as target,
+         coalesce((e->>'frames')::int, 0)                              as frames,
+         coalesce((e->>'seconds')::float8, 0)                          as seconds,
+         coalesce((e->>'hitch_ms')::float8,
+                  (e->>'hitch_ms_per_s')::float8 * (e->>'seconds')::float8, 0) as hitch_ms,
+         coalesce((e->>'dropped_frames')::int, 0)                      as dropped,
+         coalesce((e->>'degraded_share')::float8, 0)                   as degraded,
+         (e->'frame_ms'->>'p95')::float8                               as frame_p95_w,
+         -- GPU: measured windows only. Older reports sent zeros with n = 0 for "not measured".
+         case when jsonb_typeof(e->'gpu_ms') = 'object' and coalesce((e->'gpu_ms'->>'n')::int, 0) > 0
+              then (e->'gpu_ms'->>'n')::int else 0 end                 as gpu_n,
+         case when jsonb_typeof(e->'gpu_ms') = 'object' and coalesce((e->'gpu_ms'->>'n')::int, 0) > 0
+              then (e->'gpu_ms'->>'p50')::float8 end                   as gpu_p50_w,
+         case when jsonb_typeof(e->'gpu_ms') = 'object' and coalesce((e->'gpu_ms'->>'n')::int, 0) > 0
+              then (e->'gpu_ms'->>'p95')::float8 end                   as gpu_p95_w,
+         case when jsonb_typeof(e->'frame_hist') = 'array' then e->'frame_hist' end as frame_hist,
+         case when jsonb_typeof(e->'gpu_hist') = 'array' then e->'gpu_hist' end     as gpu_hist
   from r, jsonb_array_elements(coalesce(r.payload->'scenes', '[]'::jsonb)) e
 ),
 first_seen as (
-  select session, min(created_at) as first_at from r group by session
+  select session, min(at) as first_at from r group by session
+),
+step as (
+  select case when hours <= 1 then interval '1 minute'
+              when hours <= 24 then interval '10 minutes'
+              else interval '1 hour' end as width
+  from params
+),
+-- One row per (window, scene, bucket) for frame and GPU histograms
+fh as (
+  select s.id, s.scene, s.device, s.app, s.app_version, s.at, (h->>0)::int as b, (h->>1)::bigint as c
+  from s, jsonb_array_elements(s.frame_hist) h where s.frame_hist is not null
+),
+gh as (
+  select s.id, s.scene, s.device, s.app, s.app_version, (h->>0)::int as b, (h->>1)::bigint as c
+  from s, jsonb_array_elements(s.gpu_hist) h where s.gpu_hist is not null
 )
 select jsonb_build_object(
   'generated_at', now(),
@@ -54,63 +118,104 @@ select jsonb_build_object(
       'live_sessions', count(distinct session) filter (where created_at > now() - interval '2 minutes'),
       'last_report_at', max(created_at)
     ) from r),
+  'quality', (select jsonb_build_object(
+      'reports_dropped', coalesce((select sum((payload->>'reports_dropped')::int) from r), 0),
+      'screen_timing_share', round((coalesce(sum(frames) filter (where pacing = 'screen'), 0) / nullif(sum(frames), 0)::numeric), 3),
+      'histogram_share', round((coalesce(sum(frames) filter (where frame_hist is not null), 0) / nullif(sum(frames), 0)::numeric), 3),
+      'gpu_measured_share', round((coalesce(sum(frames) filter (where gpu_n > 0), 0) / nullif(sum(frames), 0)::numeric), 3)
+    ) from s),
   'overall', (select jsonb_build_object(
       'frames', coalesce(sum(frames), 0),
       'seconds', round(coalesce(sum(seconds), 0)::numeric, 1),
       'fps', round((sum(frames) / nullif(sum(seconds), 0))::numeric, 1),
-      'frame_p95', round((sum(frame_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-      'gpu_p95', round((sum(gpu_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-      'hitch', round((sum(hitch * seconds) / nullif(sum(seconds), 0))::numeric, 2),
-      'dropped', coalesce(sum(dropped), 0)
+      'hitch', round((sum(hitch_ms) / nullif(sum(seconds), 0))::numeric, 2),
+      'dropped', coalesce(sum(dropped), 0),
+      'target_fps', mode() within group (order by target),
+      'mixed_targets', count(distinct target) > 1,
+      'frame_p95_exact', bool_and(frame_hist is not null),
+      'frame_p95', case when bool_and(frame_hist is not null)
+                        then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from fh)
+                        else round((sum(frame_p95_w * frames) / nullif(sum(frames), 0))::numeric, 2)::float8 end,
+      'gpu_samples', coalesce(sum(gpu_n), 0),
+      'gpu_p95_exact', coalesce(bool_and(gpu_hist is not null) filter (where gpu_n > 0), true),
+      'gpu_p95', case when coalesce(bool_and(gpu_hist is not null) filter (where gpu_n > 0), true)
+                      then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from gh)
+                      else round((sum(gpu_p95_w * gpu_n) / nullif(sum(gpu_n), 0))::numeric, 2)::float8 end
     ) from s),
   'scenes', (select coalesce(jsonb_agg(x order by x->>'scene'), '[]'::jsonb) from (
       select jsonb_build_object(
-        'scene', scene,
-        'frames', sum(frames),
-        'fps', round((sum(frames) / nullif(sum(seconds), 0))::numeric, 1),
-        'frame_p95', round((sum(frame_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'gpu_p50', round((sum(gpu_p50 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'gpu_p95', round((sum(gpu_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'hitch', round((sum(hitch * seconds) / nullif(sum(seconds), 0))::numeric, 2),
-        'dropped', sum(dropped),
-        'degraded', round((sum(degraded * frames) / nullif(sum(frames), 0))::numeric, 3)
+        'scene', g.scene,
+        'frames', sum(g.frames),
+        'fps', round((sum(g.frames) / nullif(sum(g.seconds), 0))::numeric, 1),
+        'hitch', round((sum(g.hitch_ms) / nullif(sum(g.seconds), 0))::numeric, 2),
+        'dropped', sum(g.dropped),
+        'degraded', round((sum(g.degraded * g.frames) / nullif(sum(g.frames), 0))::numeric, 3),
+        'target_fps', mode() within group (order by g.target),
+        'mixed_targets', count(distinct g.target) > 1,
+        'frame_p95_exact', bool_and(g.frame_hist is not null),
+        'frame_p95', case when bool_and(g.frame_hist is not null)
+                          then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from fh where fh.scene = g.scene)
+                          else round((sum(g.frame_p95_w * g.frames) / nullif(sum(g.frames), 0))::numeric, 2)::float8 end,
+        'gpu_samples', sum(g.gpu_n),
+        'gpu_p95_exact', coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true),
+        'gpu_p50', case when coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true)
+                        then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.50) from gh where gh.scene = g.scene)
+                        else round((sum(g.gpu_p50_w * g.gpu_n) / nullif(sum(g.gpu_n), 0))::numeric, 2)::float8 end,
+        'gpu_p95', case when coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true)
+                        then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from gh where gh.scene = g.scene)
+                        else round((sum(g.gpu_p95_w * g.gpu_n) / nullif(sum(g.gpu_n), 0))::numeric, 2)::float8 end
       ) as x
-      from s group by scene) t),
+      from s g group by g.scene) t),
   'device_scene', (select coalesce(jsonb_agg(x), '[]'::jsonb) from (
       select jsonb_build_object(
-        'device', device,
-        'scene', scene,
-        'frames', sum(frames),
-        'gpu_p95', round((sum(gpu_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'frame_p95', round((sum(frame_p95 * frames) / nullif(sum(frames), 0))::numeric, 2)
+        'device', g.device,
+        'scene', g.scene,
+        'frames', sum(g.frames),
+        'target_fps', mode() within group (order by g.target),
+        'frame_p95_exact', bool_and(g.frame_hist is not null),
+        'frame_p95', case when bool_and(g.frame_hist is not null)
+                          then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from fh where fh.scene = g.scene and fh.device = g.device)
+                          else round((sum(g.frame_p95_w * g.frames) / nullif(sum(g.frames), 0))::numeric, 2)::float8 end,
+        'gpu_samples', sum(g.gpu_n),
+        'gpu_p95_exact', coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true),
+        'gpu_p95', case when coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true)
+                        then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from gh where gh.scene = g.scene and gh.device = g.device)
+                        else round((sum(g.gpu_p95_w * g.gpu_n) / nullif(sum(g.gpu_n), 0))::numeric, 2)::float8 end
       ) as x
-      from s group by device, scene) t),
+      from s g group by g.device, g.scene) t),
   'timeline', (select coalesce(jsonb_agg(x order by x->>'t'), '[]'::jsonb) from (
       select jsonb_build_object(
-        't', bucket,
-        'fps', round((sum(frames) / nullif(sum(seconds), 0))::numeric, 1),
-        'frame_p95', round((sum(frame_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'hitch', round((sum(hitch * seconds) / nullif(sum(seconds), 0))::numeric, 2)
+        't', b.bucket,
+        'fps', round((sum(b.frames) / nullif(sum(b.seconds), 0))::numeric, 1),
+        'hitch', round((sum(b.hitch_ms) / nullif(sum(b.seconds), 0))::numeric, 2),
+        'target_fps', mode() within group (order by b.target),
+        'frame_p95_exact', bool_and(b.frame_hist is not null),
+        'frame_p95', case when bool_and(b.frame_hist is not null)
+                          then (select public.octimonitor_pct(array_agg(fh.b), array_agg(fh.c), 0.95)
+                                from fh, step where date_bin(step.width, fh.at, timestamptz '2000-01-01') = b.bucket)
+                          else round((sum(b.frame_p95_w * b.frames) / nullif(sum(b.frames), 0))::numeric, 2)::float8 end
       ) as x
-      from (
-        select s.*, date_bin(
-                 case when p.hours <= 1 then interval '1 minute'
-                      when p.hours <= 24 then interval '10 minutes'
-                      else interval '1 hour' end,
-                 s.created_at, timestamptz '2000-01-01') as bucket
-        from s, params p
-      ) b group by bucket) t),
+      from (select s.*, date_bin(step.width, s.at, timestamptz '2000-01-01') as bucket from s, step) b
+      group by b.bucket) t),
   'session_minutes', (select coalesce(jsonb_agg(x order by (x->>'minute')::int), '[]'::jsonb) from (
       select jsonb_build_object(
         'minute', minute,
         'fps', round((sum(frames) / nullif(sum(seconds), 0))::numeric, 1),
-        'hitch', round((sum(hitch * seconds) / nullif(sum(seconds), 0))::numeric, 2),
-        'hot_share', round((coalesce(sum(seconds) filter (where thermal in ('serious', 'critical')), 0)
-                            / nullif(sum(seconds), 0))::numeric, 3),
-        'sessions', count(distinct session)
+        'hitch', round((sum(hitch_ms) / nullif(sum(seconds), 0))::numeric, 2),
+        -- share of sessions that were serious or critical at some point in this minute
+        'hot_sessions_share', round((count(distinct session) filter (where thermal in ('serious', 'critical'))
+                                     / nullif(count(distinct session), 0)::numeric), 3),
+        -- share of measured time in windows whose worst state was serious or critical
+        'hot_time_share', round((coalesce(sum(seconds) filter (where thermal in ('serious', 'critical')), 0)
+                                 / nullif(sum(seconds), 0))::numeric, 3),
+        'sessions', count(distinct session),
+        'from_session_clock', bool_and(active_start is not null)
       ) as x
       from (
-        select s.*, floor(extract(epoch from (s.created_at - f.first_at)) / 60)::int as minute
+        -- minutes of drawing since the session started, from the phone's own clock (SDK
+        -- schema 2); older reports fall back to the first report seen in the range
+        select s.*, coalesce(floor(s.active_start / 60),
+                             floor(extract(epoch from (s.at - f.first_at)) / 60))::int as minute
         from s join first_seen f using (session)
       ) m
       where minute <= 60
@@ -118,20 +223,50 @@ select jsonb_build_object(
   'thermal', (select coalesce(jsonb_object_agg(thermal, n), '{}'::jsonb) from (
       select coalesce(payload->>'thermal_worst', 'unknown') as thermal, count(*) as n
       from r group by 1) t),
-  'versions', (select coalesce(jsonb_agg(x order by x->>'app', x->>'version' desc), '[]'::jsonb) from (
+  'versions', (select coalesce(jsonb_agg(x order by x->>'app', x->>'first_at'), '[]'::jsonb) from (
       select jsonb_build_object(
-        'app', app,
-        'version', app_version,
-        'sessions', count(distinct session),
-        'fps', round((sum(frames) / nullif(sum(seconds), 0))::numeric, 1),
-        'frame_p95', round((sum(frame_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'gpu_p95', round((sum(gpu_p95 * frames) / nullif(sum(frames), 0))::numeric, 2),
-        'hitch', round((sum(hitch * seconds) / nullif(sum(seconds), 0))::numeric, 2)
+        'app', g.app,
+        'version', g.app_version,
+        'first_at', min(g.at),
+        'last_at', max(g.at),
+        'sessions', count(distinct g.session),
+        'devices', count(distinct g.device),
+        'frames', sum(g.frames),
+        'seconds', round(sum(g.seconds)::numeric, 1),
+        'fps', round((sum(g.frames) / nullif(sum(g.seconds), 0))::numeric, 1),
+        'hitch', round((sum(g.hitch_ms) / nullif(sum(g.seconds), 0))::numeric, 2),
+        'target_fps', mode() within group (order by g.target),
+        'frame_p95_exact', bool_and(g.frame_hist is not null),
+        'frame_p95', case when bool_and(g.frame_hist is not null)
+                          then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from fh where fh.app = g.app and fh.app_version = g.app_version)
+                          else round((sum(g.frame_p95_w * g.frames) / nullif(sum(g.frames), 0))::numeric, 2)::float8 end,
+        'gpu_p95', case when coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true)
+                        then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from gh where gh.app = g.app and gh.app_version = g.app_version)
+                        else round((sum(g.gpu_p95_w * g.gpu_n) / nullif(sum(g.gpu_n), 0))::numeric, 2)::float8 end
       ) as x
-      from s group by app, app_version) t),
+      from s g group by g.app, g.app_version) t),
+  -- Per build and phone model, with merged histograms, so the dashboard can compare two
+  -- builds on the phones both ran on (a change in the phone mix is not a regression)
+  'version_devices', (select coalesce(jsonb_agg(x), '[]'::jsonb) from (
+      select jsonb_build_object(
+        'app', g.app, 'version', g.app_version, 'device', g.device,
+        'sessions', count(distinct g.session),
+        'frames', sum(g.frames),
+        'seconds', round(sum(g.seconds)::numeric, 2),
+        'hitch_ms', round(sum(g.hitch_ms)::numeric, 2),
+        'gpu_samples', sum(g.gpu_n),
+        'frame_hist', case when bool_and(g.frame_hist is not null) then
+            (select jsonb_agg(jsonb_build_array(b, c) order by b) from
+              (select b, sum(c) as c from fh where fh.app = g.app and fh.app_version = g.app_version and fh.device = g.device group by b) q) end,
+        'gpu_hist', case when coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), false) then
+            (select jsonb_agg(jsonb_build_array(b, c) order by b) from
+              (select b, sum(c) as c from gh where gh.app = g.app and gh.app_version = g.app_version and gh.device = g.device group by b) q) end
+      ) as x
+      from s g group by g.app, g.app_version, g.device) t),
+  -- Anonymous summaries of the latest 30-second windows: no session id, one row per window
   'recent', (select coalesce(jsonb_agg(x order by x->>'at' desc), '[]'::jsonb) from (
       select jsonb_build_object(
-        'at', r.created_at,
+        'at', r.at,
         'app', r.app,
         'device', r.device,
         'version', r.app_version,
@@ -145,13 +280,14 @@ select jsonb_build_object(
       cross join lateral (
         select e->>'scene' as scene, (e->>'fps')::float8 as fps,
                (e->'frame_ms'->>'p95')::float8 as frame_p95,
-               (e->'gpu_ms'->>'p95')::float8 as gpu_p95
+               case when jsonb_typeof(e->'gpu_ms') = 'object' and coalesce((e->'gpu_ms'->>'n')::int, 0) > 0
+                    then (e->'gpu_ms'->>'p95')::float8 end as gpu_p95
         from jsonb_array_elements(coalesce(r.payload->'scenes', '[]'::jsonb)) e
         order by (e->>'frames')::int desc nulls last
         limit 1
       ) top
-      order by r.created_at desc
-      limit 15) t)
+      order by r.at desc
+      limit 12) t)
 );
 $$;
 

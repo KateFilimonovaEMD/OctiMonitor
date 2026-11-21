@@ -21,3 +21,37 @@ jobs:
           print(next(d["udid"] for runtime, ds in sorted(devices.items(), reverse=True) if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")))')
           xcodebuild test -scheme OctiMonitor -destination "id=$UDID" -skipPackagePluginValidation | tail -40
           exit ${PIPESTATUS[0]}
+
+  backend:
+    # The SQL that runs in Supabase, tested against a real Postgres: ingestion rules as the
+    # public role, and the dashboard's numbers against values computed from every frame.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pg
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: pg
+    steps:
+      - uses: actions/checkout@v4
+      - name: Supabase API roles
+        run: psql -v ON_ERROR_STOP=1 -c "create role anon nologin; create role authenticated nologin;"
+      - name: Install schema, rules and dashboard function
+        run: psql -v ON_ERROR_STOP=1 -f Backend/schema.sql -f Backend/hardening.sql -f Backend/dashboard.sql
+      - name: Ingestion rules (as the public role)
+        run: psql -v ON_ERROR_STOP=1 -f Backend/tests/check_rules.sql
+      - name: Upgrade path (first schema + migration 002)
+        run: |
+          psql -v ON_ERROR_STOP=1 -c "create database upgrade"
+          psql -v ON_ERROR_STOP=1 -d upgrade -f Backend/tests/schema_v1.sql -f Backend/migrations/002_accuracy_and_rules.sql
+          psql -v ON_ERROR_STOP=1 -d upgrade -f Backend/tests/check_rules.sql
+      - name: Dashboard numbers against ground truth
+        run: |
+          pip install "psycopg[binary]"
+          python3 Backend/tests/check_dashboard.py "postgresql://postgres:pg@localhost/postgres"
