@@ -8,7 +8,7 @@ jobs:
   test:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Smoke test (no simulator)
         run: swiftc Sources/OctiMonitor/PerfStats.swift Smoke/main.swift -o "$RUNNER_TEMP/perf-smoke" && "$RUNNER_TEMP/perf-smoke"
@@ -39,7 +39,7 @@ jobs:
       PGUSER: postgres
       PGPASSWORD: pg
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Supabase API roles
         run: psql -v ON_ERROR_STOP=1 -c "create role anon nologin; create role authenticated nologin;"
       - name: Install schema, rules and dashboard function
