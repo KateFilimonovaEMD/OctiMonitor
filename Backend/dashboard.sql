@@ -183,6 +183,25 @@ select jsonb_build_object(
                         else round((sum(g.gpu_p95_w * g.gpu_n) / nullif(sum(g.gpu_n), 0))::numeric, 2)::float8 end
       ) as x
       from s g group by g.device, g.scene) t),
+  'devices', (select coalesce(jsonb_agg(x order by x->>'device'), '[]'::jsonb) from (
+      select jsonb_build_object(
+        'device', g.device,
+        'frames', sum(g.frames),
+        'sessions', count(distinct g.session),
+        'fps', round((sum(g.frames) / nullif(sum(g.seconds), 0))::numeric, 1),
+        'hitch', round((sum(g.hitch_ms) / nullif(sum(g.seconds), 0))::numeric, 2),
+        'target_fps', mode() within group (order by g.target),
+        'frame_p95_exact', bool_and(g.frame_hist is not null),
+        'frame_p95', case when bool_and(g.frame_hist is not null)
+                          then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from fh where fh.device = g.device)
+                          else round((sum(g.frame_p95_w * g.frames) / nullif(sum(g.frames), 0))::numeric, 2)::float8 end,
+        'gpu_samples', sum(g.gpu_n),
+        'gpu_p95_exact', coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true),
+        'gpu_p95', case when coalesce(bool_and(g.gpu_hist is not null) filter (where g.gpu_n > 0), true)
+                        then (select public.octimonitor_pct(array_agg(b), array_agg(c), 0.95) from gh where gh.device = g.device)
+                        else round((sum(g.gpu_p95_w * g.gpu_n) / nullif(sum(g.gpu_n), 0))::numeric, 2)::float8 end
+      ) as x
+      from s g group by g.device) t),
   'timeline', (select coalesce(jsonb_agg(x order by x->>'t'), '[]'::jsonb) from (
       select jsonb_build_object(
         't', b.bucket,
