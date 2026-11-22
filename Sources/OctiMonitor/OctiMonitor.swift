@@ -9,12 +9,12 @@ import QuartzCore
 ///
 /// // Every frame (main thread)
 /// commandBuffer.addCompletedHandler { b in
-///     OctiMonitor.recordGPU(start: b.gpuStartTime, end: b.gpuEndTime, scene: "Slime")
+///     OctiMonitor.recordGPU(start: b.gpuStartTime, end: b.gpuEndTime, scene: "Level 3")
 /// }
 /// drawable.addPresentedHandler { d in
-///     OctiMonitor.recordPresented(time: d.presentedTime, scene: "Slime", targetFPS: 60)
+///     OctiMonitor.recordPresented(time: d.presentedTime, scene: "Level 3", targetFPS: 60)
 /// }
-/// OctiMonitor.recordFrame(interval: dt, cpu: cpuTime, scene: "Slime", targetFPS: 60)
+/// OctiMonitor.recordFrame(interval: dt, cpu: cpuTime, scene: "Level 3", targetFPS: 60)
 ///
 /// // Overlay
 /// ZStack { content; OctiMonitorHUD() }

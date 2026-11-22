@@ -47,15 +47,15 @@ for s_i in range(12):
     for w in range(6):                         # six 30-second windows per session
         ended = now - dt.timedelta(minutes=50 - s_i * 2 - w * 0.5)
         scenes = []
-        for scene in ("Spark", "Slime"):
+        for scene in ("Level 3", "Boss fight"):
             frames, gpu = [], []
             n = random.randint(800, 1700)
-            measure_gpu = not (scene == "Slime" and s_i % 3 == 1)   # some windows never measure GPU
+            measure_gpu = not (scene == "Boss fight" and s_i % 3 == 1)   # some windows never measure GPU
             for _ in range(n):
-                late = random.random() < (0.04 if scene == "Spark" else 0.01)
+                late = random.random() < (0.04 if scene == "Level 3" else 0.01)
                 f = slot * (random.choice([2, 3]) if late else random.uniform(0.97, 1.03))
                 frames.append(f)
-                if measure_gpu: gpu.append(random.gauss(devices[device][1] * (1.6 if scene == "Spark" else 1), 1.2))
+                if measure_gpu: gpu.append(random.gauss(devices[device][1] * (1.6 if scene == "Level 3" else 1), 1.2))
             gpu = [max(0.3, g) for g in gpu]
             secs = sum(frames) / 1000
             hitch_ms = sum(f - slot for f in frames if f > 1.5 * slot)

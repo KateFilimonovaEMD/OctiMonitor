@@ -33,7 +33,7 @@ import OctiMonitor
 ```swift
 func draw(in view: MTKView) {
     let start = CACurrentMediaTime()
-    let scene = "Slime"                     // stable string literal
+    let scene = "Level 3"                   // stable string literal
     let target = min(view.preferredFramesPerSecond, view.window?.screen.maximumFramesPerSecond ?? 60)
     commandBuffer.addCompletedHandler { b in
         OctiMonitor.recordGPU(start: b.gpuStartTime, end: b.gpuEndTime, scene: scene)
@@ -96,7 +96,7 @@ A `perf` row (schema 2). The histograms list only non-empty buckets as `[bucket,
     "session_active_start_s": 90.02, "session_active_s": 119.93,
     "thermal_now": "fair", "thermal_worst": "fair", "memory_mb_peak": 212.4,
     "scenes": [{
-      "scene": "Slime", "target_fps": 60, "frames": 1790, "seconds": 29.91, "fps": 59.85,
+      "scene": "Level 3", "target_fps": 60, "frames": 1790, "seconds": 29.91, "fps": 59.85,
       "frame_ms": {"p50": 16.67, "p95": 16.71, "p99": 16.98, "max": 50.1, "n": 1790},
       "frame_hist": [[66, 1720], [67, 66], [133, 3], [200, 1]],
       "gpu_ms": {"p50": 6.1, "p95": 8.9, "p99": 8.98, "max": 8.99, "n": 1790},
