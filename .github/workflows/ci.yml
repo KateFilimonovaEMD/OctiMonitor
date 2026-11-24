@@ -46,16 +46,20 @@ jobs:
         run: psql -v ON_ERROR_STOP=1 -f Backend/schema.sql -f Backend/hardening.sql -f Backend/dashboard.sql
       - name: Ingestion rules (as the public role)
         run: psql -v ON_ERROR_STOP=1 -f Backend/tests/check_rules.sql
-      - name: Upgrade path (first schema + migration 002)
+      - name: Upgrade path (first schema + migrations 002 and 003)
         run: |
           psql -v ON_ERROR_STOP=1 -c "create database upgrade"
           psql -v ON_ERROR_STOP=1 -d upgrade -f Backend/tests/schema_v1.sql
           # an app that already reports must keep reporting after the upgrade
           psql -v ON_ERROR_STOP=1 -d upgrade -c "insert into public.perf_reports (app, kind, session, device, os, app_version, build, payload) values ('com.legacy.app', 'perf', gen_random_uuid(), 'iPhone14,7', 'iOS 18', '1.0 (1)', 'release', '{\"scenes\":[{\"scene\":\"x\",\"frames\":10}]}')"
-          psql -v ON_ERROR_STOP=1 -d upgrade -f Backend/migrations/002_accuracy_and_rules.sql -f Backend/migrations/002_accuracy_and_rules.sql
+          psql -v ON_ERROR_STOP=1 -d upgrade -f Backend/migrations/002_accuracy_and_rules.sql -f Backend/migrations/003_diagnostics.sql -f Backend/migrations/002_accuracy_and_rules.sql -f Backend/migrations/003_diagnostics.sql
+          # any order of re-runs leaves exactly one dashboard function
+          psql -v ON_ERROR_STOP=1 -d upgrade -c "do \$\$ begin if (select count(*) from pg_proc where proname = 'octimonitor_overview') <> 1 then raise exception 'overloaded dashboard function'; end if; end \$\$;"
           psql -v ON_ERROR_STOP=1 -d upgrade -c "do \$\$ begin if not exists (select 1 from public.octimonitor_apps where app = 'com.legacy.app') then raise exception 'reporting app not kept'; end if; end \$\$;"
           psql -v ON_ERROR_STOP=1 -d upgrade -f Backend/tests/check_rules.sql
       - name: Dashboard numbers against ground truth
         run: |
           pip install "psycopg[binary]"
           python3 Backend/tests/check_dashboard.py "postgresql://postgres:pg@localhost/postgres"
+      - name: Edge cases (late delivery, mixed targets, two apps, debug vs release, gaps, coverage)
+        run: python3 Backend/tests/check_cases.py "postgresql://postgres:pg@localhost/upgrade"

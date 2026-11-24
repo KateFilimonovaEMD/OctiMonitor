@@ -67,11 +67,20 @@ The panel shows the scene, thermal state, FPS against the target, frame p95/p99,
 
 ## Backend (Supabase)
 
-New project: run [`Backend/schema.sql`](Backend/schema.sql), [`Backend/hardening.sql`](Backend/hardening.sql) and [`Backend/dashboard.sql`](Backend/dashboard.sql) in the Supabase SQL Editor. A project created with the first version: run [`Backend/migrations/002_accuracy_and_rules.sql`](Backend/migrations/002_accuracy_and_rules.sql) once (it contains the other two and is safe to re-run). It keeps every app that has already sent reports allowed; add apps that haven't reported yet to `octimonitor_apps`.
+New project: run [`Backend/schema.sql`](Backend/schema.sql), [`Backend/hardening.sql`](Backend/hardening.sql) and [`Backend/dashboard.sql`](Backend/dashboard.sql) in the Supabase SQL Editor. Existing projects, once each in the SQL Editor (both are safe to re-run, in any order):
+
+- created with the first version: [`Backend/migrations/002_accuracy_and_rules.sql`](Backend/migrations/002_accuracy_and_rules.sql). It contains the rules and the current dashboard function, and keeps every app that has already sent reports allowed; add apps that haven't reported yet to `octimonitor_apps`.
+- already on 002: [`Backend/migrations/003_diagnostics.sql`](Backend/migrations/003_diagnostics.sql), the current dashboard function. A dashboard page from before 003 keeps working with it, and the current page works with an older function, without the newer details.
 
 - `schema.sql`: the table; the app key can only insert.
 - `hardening.sql`: only apps listed in `octimonitor_apps` can report (`insert into public.octimonitor_apps values ('com.example.app');`), reports must have the SDK's shape (numbers where numbers belong, in plausible ranges, valid histograms), at most 40 per session and 2,000 per app per minute (over that the API answers 429 and the SDK retries later), and no sequence rights for the public role.
-- `dashboard.sql`: one read-only function for a public dashboard. Percentiles from merged histograms, GPU over measured frames only, a frame budget per group from the reported target rates, and per-build, per-phone data so builds can be compared on the same phones. Every field is read defensively, so a malformed row stored before the rules existed can't break it.
+- `dashboard.sql`: one read-only function for a public dashboard, `octimonitor_overview(hours, app, scene, device, scene_app)`.
+  - Percentiles from merged histograms; GPU over measured frames only, with its coverage (samples per frame, at most one); CPU per frame; sessions and report windows for every scene and phone.
+  - Reports are counted in the period they were measured, not when they arrived.
+  - Scenes are keyed by app and name, builds by version and channel (debug or release), and a frame budget comes from each group's own target rate, with frame time per rate when several are in view.
+  - Per-build, per-phone histograms so builds can be compared on the same phones.
+  - The optional scene and device narrow the timeline only.
+  - Every field is read defensively, so a malformed row stored before the rules existed can't break it. Histogram entries are summed once per key before percentiles are taken: about 1.6 s for 4,500 reports.
 
 Dashboard: [`Dashboard/`](Dashboard/) is a ready-made copy of the live dashboard for your own backend: set your project URL and key in one place and publish the folder anywhere static. Setup in [`Dashboard/README.md`](Dashboard/README.md). Live example: https://evamariadreams.com/octimonitor/, with a page on how every number is measured: https://evamariadreams.com/octimonitor/docs/
 
@@ -124,8 +133,8 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 ## Tests
 
 - `Tests/OctiMonitorTests`: XCTest on the iOS Simulator, including histogram merging, screen timing, missing GPU and cost per frame.
-- `Backend/tests`: the SQL against a real Postgres. `check_dashboard.py` simulates phones frame by frame and compares the dashboard function's percentiles, fps, hitch time and heat shares with values computed from every frame; `check_rules.sql` checks the ingestion rules as the public role.
-- GitHub Actions runs all of it on every push (`.github/workflows/ci.yml`), plus the upgrade path from the first schema.
+- `Backend/tests`: the SQL against a real Postgres. `check_dashboard.py` simulates phones frame by frame and compares the dashboard function's percentiles, fps, hitch time and heat shares with values computed from every frame; `check_rules.sql` checks the ingestion rules as the public role; `check_cases.py` covers the cases that most often mislead (partial GPU timing, mixed target rates, two apps with one scene name, late delivery, debug vs release, one long run vs many sessions, gaps, a scoped timeline).
+- GitHub Actions runs all of it on every push (`.github/workflows/ci.yml`), plus the upgrade path from the first schema through 002 and 003.
 - `Smoke/main.swift`: pure-math check that needs only `swiftc`:
   `swiftc Sources/OctiMonitor/PerfStats.swift Smoke/main.swift -o /tmp/s && /tmp/s`
 
@@ -134,6 +143,9 @@ Reports contain no user, device or advertising identifiers. `session` is a rando
 - Up to 20 unsent reports wait in memory. When the app goes to the background they are saved to disk, together with a batch still on its way, and the file stays until the server confirms them, including across launches; so closing the app while offline doesn't lose them, and a delivered batch is never sent twice. A crash while offline before the app was ever backgrounded can lose them. Saved reports whose window ended more than a day ago are discarded, and each report counts the ones lost before it.
 - Reports are retried when the device is offline, the request times out, or the server answers 408, 429 or 5xx (the rate limits answer 429). Any other 4xx means the server rejected the rows themselves, so they are dropped rather than holding up newer reports. A batch is accepted or rejected as a whole.
 - Rows over 200 KB are not sent (the table refuses payloads over 256 KB, and one refused row would fail its whole batch); in practice only very large MetricKit diagnostics come near this.
+- `cpu_ms_avg` is the CPU time the app passes to `recordFrame` for building a frame, not total main-thread load, so on its own it can't show a scene is CPU-bound.
+- Reports carry no device identifier, so the dashboard counts phone models, not phones.
+- The dashboard function reads histograms stored as JSON in one pass. Supabase stops queries from the public key after a few seconds, which this reaches at roughly ten thousand reports in one range; the dashboard then asks for a shorter range. Beyond that, an hourly summary table filled on insert would be the next step.
 - MetricKit crash stacks arrive unsymbolicated: match the addresses against the build's dSYM.
 - The publishable key can be extracted from the app, so the ingestion rules stop floods and malformed reports, not plausible fakes. Proving reports come from a genuine app needs App Attest checked by a server in front of the database.
 

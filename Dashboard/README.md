@@ -8,6 +8,7 @@ A ready-made web dashboard for your own OctiMonitor data: the same page as the [
 ## Setup (about 10 minutes)
 
 1. **Create the backend.** In a new [Supabase](https://supabase.com) project, open the SQL Editor and run, in order, [`Backend/schema.sql`](../Backend/schema.sql), [`Backend/hardening.sql`](../Backend/hardening.sql) and [`Backend/dashboard.sql`](../Backend/dashboard.sql).
+   Already have a backend from an earlier OctiMonitor version? Run [`Backend/migrations/003_diagnostics.sql`](../Backend/migrations/003_diagnostics.sql) instead (or `002` first if you started with the very first schema); the page also works with an older function, without the newer details.
 2. **Allow your app** to report (one line per bundle id):
    ```sql
    insert into public.octimonitor_apps values ('com.example.mygame');
